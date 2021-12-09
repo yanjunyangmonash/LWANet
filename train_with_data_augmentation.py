@@ -15,17 +15,23 @@ from tensorboardX import SummaryWriter
 from focalloss import FocalLoss
 import torch.nn as nn
 from LWANet import LWANet
+from LWANet import AFB
 from torch._six import container_abcs
 from batchgenerators.transforms.spatial_transforms import MirrorTransform
+from batchgenerators.transforms.spatial_transforms import SpatialTransform
+from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform
+from batchgenerators.transforms.color_transforms import ContrastAugmentationTransform
+from batchgenerators.transforms.color_transforms import BrightnessMultiplicativeTransform
+from batchgenerators.transforms.color_transforms import GammaTransform
 from batchgenerators.transforms import NumpyToTensor, Compose
 
 
 device_ids = [0]
 
 parse = argparse.ArgumentParser()
-num_classes = 11
-new_num_classes = 8
-lra = 0.00002
+num_classes = 5
+new_num_classes = 5
+lra = 0.001
 
 
 def cat_data(catdata):
@@ -40,38 +46,71 @@ def new_collate(batch):
 
 def adjust_learning_rate(optimizer, epoch):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = lra * (0.8 ** (epoch // 30))
+    lr = lra * (0.9 ** (epoch // 120))
+    print('Updata lr, lr is ', str(lr))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
 
 def load_file_dir():
-    train_file_dir = 'dataset/train_high_res_pic/images'
-    val_file_names = glob.glob('dataset/test_high_res_pic/images/*.png')
+    train_file_dir = 'dataset/train_logic/images'
+    val_file_names = glob.glob('dataset/test_logic/images/*.png')
     return train_file_dir, val_file_names
 
 
 def train():
     mod = LWANet(num_classes=num_classes, pretrained=True)
-    weight_load = 'Logs/T20200911_211620/weights_7.pth'
+    weight_load = 'Logs/T20211209_103331/weights_757.pth'
     # Loading model weight
     mod.load_state_dict(
         {k.replace('module.', ''): v for k, v in torch.load(weight_load, map_location=torch.device("cpu")).items()})
     for param in mod.parameters():
         param.requires_grad = False
     # Modify final layer output
-    mod.final[1][3] = nn.Conv2d(24, new_num_classes, kernel_size=(1, 1), stride=(1, 1), bias=False)
-    mod.final[1][4] = nn.BatchNorm2d(new_num_classes)
-    # print(mod)
+
+    mod.afb1 = AFB(24, 24)
+
+    mod.final[0] = nn.Sequential(
+        nn.Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=24, bias=False),
+        nn.BatchNorm2d(24, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.5),
+        nn.Conv2d(24, 24, kernel_size=(1, 1), stride=(1, 1), bias=False),
+        nn.BatchNorm2d(24, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        nn.ReLU(inplace=True),
+        nn.Dropout(p=0.5))
+
+    mod.final[1] = nn.Sequential(
+        nn.Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), groups=24, bias=False),
+        nn.BatchNorm2d(24, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.5),
+        nn.Conv2d(24, new_num_classes, kernel_size=(1, 1), stride=(1, 1), bias=False),
+        nn.BatchNorm2d(new_num_classes),
+        nn.ReLU(inplace=True),
+        nn.Dropout(p=0.5))
+
+    #print(mod)
     model = mod.cuda(device_ids[0])
 
     batch_size = args.batch_size
-    criterion = FocalLoss(alpha=0.25, gamma=2)
+    criterion = FocalLoss(alpha=0.15, gamma=5)
     optimizer = optim.Adam(model.parameters(), lr=lra)
 
     # Data Augmentation
     numpy_to_tensor = NumpyToTensor(['data', 'seg'], cast_to=None)
-    tr_transforms = [MirrorTransform(axes=(0, 1))]
+    tr_transforms = [SpatialTransform((544, 960), [272, 480], True,
+                                      (0, 200), (11, 17), True, (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
+                                      angle_y=(0, 0), angle_z=(0, 0), do_scale=True, scale=(0.75, 1.25),
+                                      border_mode_data='constant', order_seg=1, random_crop=True, p_el_per_sample=0.2,
+                                      p_scale_per_sample=0.2, p_rot_per_sample=0.2)]
+
+    tr_transforms.append(MirrorTransform(axes=(0, 1)))
+    tr_transforms.append(GaussianNoiseTransform(p_per_sample=0.1))
+    tr_transforms.append(
+        BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25), p_per_sample=0.1, per_channel=False))
+    tr_transforms.append(ContrastAugmentationTransform(p_per_sample=0.1, per_channel=False))
+    tr_transforms.append(GammaTransform((0.6, 1.75), False, per_channel=False, retain_stats=True, p_per_sample=0.2))
     tr_transforms.append(numpy_to_tensor)
     tr_transforms = Compose(tr_transforms)
     transform = tr_transforms
@@ -81,11 +120,12 @@ def train():
     val_dataset = LoadDatasetVal(val_file)
 
     dataloaders = DataLoader(liver_dataset, batch_size=batch_size, shuffle=True, num_workers=12, collate_fn=new_collate)  # drop_last=True
+    print(len(liver_dataset))
     val_load = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=12)
     train_model(model, criterion, optimizer, dataloaders, val_load)
 
 
-def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=200):
+def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=800):
     loss_list = []
     dice_list = []
     logs_dir = 'Logs/T{}/'.format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -123,16 +163,15 @@ def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=200)
             epoch_loss_mean = np.mean(epoch_loss).astype(np.float64)
             tq.set_postfix(loss='{0:.3f}'.format(epoch_loss_mean))
 
-            #'''
+            '''
             writer.add_images('images', inputs, epoch)
             writer.add_images('masks/true', labels_quarter, epoch)
             outputs_exp = torch.exp(outputs)
-            output_max = outputs_exp.argmax(dim=0)
+            output_max = outputs_exp.argmax(dim=1)
             output_max = output_max[:, None, :, :]
-            #outputs_exp = torch.exp(outputs[:, 1, :, :])
-            #output_max = outputs_exp[:, None, :, :]
-            writer.add_images('masks/pred', output_max > 0.6, epoch)
-            #'''
+            output_max = output_max != 0
+            writer.add_images('masks/pred', output_max, epoch)
+            '''
 
         loss_list.append(epoch_loss_mean)
         tq.close()
@@ -161,7 +200,7 @@ def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=200)
 
 if __name__ == '__main__':
     parse = argparse.ArgumentParser()
-    parse.add_argument("--batch_size", type=int, default=8)
+    parse.add_argument("--batch_size", type=int, default=16)
     args = parse.parse_args()
     train()
 
