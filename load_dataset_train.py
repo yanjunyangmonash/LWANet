@@ -17,9 +17,8 @@ class LoadDataset(Dataset):
         self.masks_dir = imgs_dir.replace('image', 'label')
         self.transform = transform
         self.scale = scale
+        # https://blog.finxter.com/python-one-line-for-loop-with-if/, if condition inside for loop
         self.ids = [splitext(file)[0] for file in listdir(imgs_dir) if not file.startswith('.')]
-        self.mean = 0.5
-        self.std = 0.5
         logging.info(f'Creating dataset with {len(self.ids)} examples')
 
     def __len__(self):
@@ -40,7 +39,8 @@ class LoadDataset(Dataset):
         # Not do normalize for labels
         if img_trans.max() > 1 and img_trans.shape[0] != 1:
             img_trans = img_trans / 255
-            # Normalise data to [-1, 1] will cause strange images in tensor board
+            # Normalise data to [-1, 1]
+            # https://discuss.pytorch.org/t/understanding-transform-normalize/21730/34?page=2
             img_trans = (img_trans - mean) / std
         # Add a channel here to use batchgenerator
         img_trans = np.expand_dims(img_trans, axis=0)
@@ -56,7 +56,7 @@ class LoadDataset(Dataset):
             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
         assert len(img_file) == 1, \
             f'Either no image or multiple images found for the ID {idx}: {img_file}'
-        mask = Image.open(mask_file[0])
+        mask = Image.open(mask_file[0])  # Use [0] because mask_file is a list
         img = Image.open(img_file[0])
 
         assert img.size == mask.size, \
@@ -93,7 +93,7 @@ class LoadDatasetVal(Dataset):
 
 
 x_transforms = transforms.Compose([
-    transforms.ToTensor(),
+    transforms.ToTensor(),  # Automatically scale pixel value to [0, 1]
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ])
 
@@ -104,38 +104,7 @@ def load_image(path):
 
 
 def load_mask(path):
-    new_path=path.replace('image', 'label')
+    new_path = path.replace('image', 'label')
     mask = cv2.imread(new_path, 0)
     return mask.astype(np.uint8)
 
-
-'''
-# Code to check original dataset output
-from torch.utils.data import DataLoader
-val_file_names = glob.glob('dataset/test/images/*.jpg')
-liver_dataset = LoadDatasetVal(val_file_names)
-val_load = DataLoader(liver_dataset, batch_size=2, shuffle=True, num_workers=1)
-examples = iter(val_load)
-'''
-
-'''
-# A simple demo to show how the data loader works
-imgs_dir = 'dataset/test/images'
-masks_dir = imgs_dir.replace('image', 'label')
-ids = [splitext(file)[0] for file in listdir(masks_dir) if not file.startswith('.')]
-print(ids)
-idx = ids[3]
-print(idx)
-img_file = glob.glob(masks_dir + '/' + idx + '*')
-print(img_file)
-mask = Image.open(img_file[0])
-img_nd = np.array(mask)
-print(img_nd.shape)
-if len(img_nd.shape) == 2:
-    img_nd = np.expand_dims(img_nd, axis=2)
-print(img_nd.shape)
-img_trans = img_nd.transpose((2, 0, 1))
-print(img_trans.shape)
-img_trans = np.expand_dims(img_trans, axis=0)
-print(img_trans.shape)
-'''
