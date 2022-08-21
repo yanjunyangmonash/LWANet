@@ -112,47 +112,37 @@ def predict_image():
     with torch.no_grad():
         for inputs, targets in val_loader:
             inputs = inputs.cuda(0)
-            outputs_ln = model(inputs)
+            outputs_ln = model(inputs)  # Output size: [1, class_num, H, W]
             outputs_exp = torch.exp(outputs_ln)
-            output_max = outputs_exp.argmax(dim=1)
-            output_max = output_max.cpu().numpy()
-
+            output_max = outputs_exp.argmax(dim=1)  # Returns the indices of the maximum value (class)
+            output_max = output_max.cpu().numpy()  # [C, H, W]
             output_maxs = np.squeeze(output_max, axis=0)
             output_maxs = output_maxs.astype('float32')
-            vis2 = cv.cvtColor(output_maxs, cv.COLOR_GRAY2BGR)
-            cv.imshow('output', vis2)
+            vis_output = cv.cvtColor(output_maxs, cv.COLOR_GRAY2BGR)  # [H, W, C]
+            cv.imshow('output', vis_output)
 
             inputs_np = inputs.cpu().numpy()
             inputs_np = ((inputs_np * 0.5) + 0.5) * 255
             inputs_np = np.squeeze(inputs_np, 0)
             inputs_np = inputs_np.transpose(1, 2, 0)
-
-
-            #'''
+            # Get attached mask
             data = np.zeros((136, 240, 3)) + 255
             key1 = output_max[0] != 0
-
             data[:, :, 0][key1] = 0
             data[:, :, 1][key1] = 0
             data[:, :, 2][key1] = 150
 
             dim = (960, 544)
             resized_data = cv.resize(data, dim, interpolation=cv.INTER_AREA)
-            cv.imshow("image", resized_data)
-            #'''
-            inputs_np = cv.cvtColor(inputs_np, cv.COLOR_RGB2BGR)
+            cv.imshow("attached mask", resized_data)
 
+            inputs_np = cv.cvtColor(inputs_np, cv.COLOR_RGB2BGR)
             stack_img = cv.addWeighted(inputs_np, 0.8, resized_data, 0.2, 0.4, dtype=cv.CV_8UC3)
-            cv.imshow("image", stack_img)
+            cv.imshow("Stacked input&output", stack_img)
             k = cv.waitKey(0)
             if k == 27:
                 cv.destroyAllWindows()
 
 
 if __name__ == '__main__':
-    img_file = '/home/yanjun/LWANet/dataset/train_MICCAI2019/labels/31360.png'
-
-    #img_file = 'dataset/test_high_res_pic/images/*.png'
-    #loop_all_imgs(img_file)
-
     predict_image()
