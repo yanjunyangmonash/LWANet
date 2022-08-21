@@ -16,7 +16,8 @@ from focalloss import FocalLoss
 import torch.nn as nn
 from LWANet import LWANet
 from LWANet import AFB
-from torch._six import container_abcs
+# from torch._six import container_abcs
+from collections import abc as container_abcs
 from batchgenerators.transforms.spatial_transforms import MirrorTransform
 from batchgenerators.transforms.spatial_transforms import SpatialTransform
 from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform
@@ -46,8 +47,7 @@ def new_collate(batch):
 
 def adjust_learning_rate(optimizer, epoch):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = lra * (0.9 ** (epoch // 120))
-    print('Updata lr, lr is ', str(lr))
+    lr = lra * (0.8 ** (epoch // 100))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -61,13 +61,16 @@ def load_file_dir():
 def train():
     mod = LWANet(num_classes=num_classes, pretrained=True)
     weight_load = 'Logs/T20211209_103331/weights_757.pth'
+
     # Loading model weight
+    # map_location shows where the model is loaded, because we use mod.cuda(device_ids[0]), it's ok to use "cpu" here
+    # No parameter name contains 'module.', have no idea why use k.replace, but I'll just keep it
     mod.load_state_dict(
         {k.replace('module.', ''): v for k, v in torch.load(weight_load, map_location=torch.device("cpu")).items()})
+
     for param in mod.parameters():
         param.requires_grad = False
     # Modify final layer output
-
     mod.afb1 = AFB(24, 24)
 
     mod.final[0] = nn.Sequential(
@@ -90,7 +93,6 @@ def train():
         nn.ReLU(inplace=True),
         nn.Dropout(p=0.5))
 
-    #print(mod)
     model = mod.cuda(device_ids[0])
 
     batch_size = args.batch_size
@@ -99,19 +101,19 @@ def train():
 
     # Data Augmentation
     numpy_to_tensor = NumpyToTensor(['data', 'seg'], cast_to=None)
+    # Changed format here
     tr_transforms = [SpatialTransform((544, 960), [272, 480], True,
                                       (0, 200), (11, 17), True, (-180. / 360 * 2. * np.pi, 180. / 360 * 2. * np.pi),
                                       angle_y=(0, 0), angle_z=(0, 0), do_scale=True, scale=(0.75, 1.25),
                                       border_mode_data='constant', order_seg=1, random_crop=True, p_el_per_sample=0.2,
-                                      p_scale_per_sample=0.2, p_rot_per_sample=0.2)]
+                                      p_scale_per_sample=0.2, p_rot_per_sample=0.2), MirrorTransform(axes=(0, 1)),
+                     GaussianNoiseTransform(p_per_sample=0.1),
+                     BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25), p_per_sample=0.1,
+                                                       per_channel=False),
+                     ContrastAugmentationTransform(p_per_sample=0.1, per_channel=False),
+                     GammaTransform((0.6, 1.75), False, per_channel=False, retain_stats=True, p_per_sample=0.2),
+                     numpy_to_tensor]
 
-    tr_transforms.append(MirrorTransform(axes=(0, 1)))
-    tr_transforms.append(GaussianNoiseTransform(p_per_sample=0.1))
-    tr_transforms.append(
-        BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25), p_per_sample=0.1, per_channel=False))
-    tr_transforms.append(ContrastAugmentationTransform(p_per_sample=0.1, per_channel=False))
-    tr_transforms.append(GammaTransform((0.6, 1.75), False, per_channel=False, retain_stats=True, p_per_sample=0.2))
-    tr_transforms.append(numpy_to_tensor)
     tr_transforms = Compose(tr_transforms)
     transform = tr_transforms
 
@@ -120,12 +122,11 @@ def train():
     val_dataset = LoadDatasetVal(val_file)
 
     dataloaders = DataLoader(liver_dataset, batch_size=batch_size, shuffle=True, num_workers=12, collate_fn=new_collate)  # drop_last=True
-    print(len(liver_dataset))
     val_load = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=12)
     train_model(model, criterion, optimizer, dataloaders, val_load)
 
 
-def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=800):
+def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=1200):
     loss_list = []
     dice_list = []
     logs_dir = 'Logs/T{}/'.format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -163,21 +164,12 @@ def train_model(model, criterion, optimizer, dataload, val_load, num_epochs=800)
             epoch_loss_mean = np.mean(epoch_loss).astype(np.float64)
             tq.set_postfix(loss='{0:.3f}'.format(epoch_loss_mean))
 
-            '''
-            writer.add_images('images', inputs, epoch)
-            writer.add_images('masks/true', labels_quarter, epoch)
-            outputs_exp = torch.exp(outputs)
-            output_max = outputs_exp.argmax(dim=1)
-            output_max = output_max[:, None, :, :]
-            output_max = output_max != 0
-            writer.add_images('masks/pred', output_max, epoch)
-            '''
-
         loss_list.append(epoch_loss_mean)
         tq.close()
         print("epoch %d loss:%0.3f" % (epoch, epoch_loss_mean))
-        dice, iou = val_multi(model, criterion, val_load, new_num_classes, args.batch_size, device_ids)
+        dice, iou, val_loss = val_multi(model, criterion, val_load, new_num_classes, args.batch_size, device_ids)
         writer.add_scalar('Loss', epoch_loss_mean, epoch)
+        writer.add_scalar('Val Loss', val_loss, epoch)
         writer.add_scalar('Dice', dice, epoch)
         writer.add_scalar('IoU', iou, epoch)
         dice_list.append([dice, iou])
@@ -203,37 +195,3 @@ if __name__ == '__main__':
     parse.add_argument("--batch_size", type=int, default=16)
     args = parse.parse_args()
     train()
-
-    '''
-    # A demo shows how the new_collate func works
-    def cat_data_demo(catdata):
-        return torch.cat(catdata, 0, out=None)
-
-
-    def new_collate_demo(batch):
-        # If data in batch is in dict
-        if isinstance(batch[0], container_abcs.Mapping):
-            #dict_a = {key: cat_data_demo([d[key] for d in batch]) for key in batch[0]}
-            #print(dict_a['data'].shape)
-            return {key: cat_data_demo([d[key] for d in batch]) for key in batch[0]}
-
-
-    numpy_to_tensor = NumpyToTensor(['data', 'seg'], cast_to=None)
-    tr_transforms = []
-    tr_transforms.append(numpy_to_tensor)
-    tr_transforms = Compose(tr_transforms)
-    transform = tr_transforms
-
-    train_dir, val_dir = load_file_dir()
-    liver_dataset = LoadDataset(val_dir, transform)
-    train_loader = DataLoader(liver_dataset, batch_size=8, shuffle=True, num_workers=8, pin_memory=True, 
-                                collate_fn=new_collate_demo)
-    #examples = iter(train_loader)
-    #example_data = examples.next()
-
-    for batch in train_loader:
-        imgs = batch['data']
-        imgs = imgs.to(torch.float32)
-        inputs = imgs.cuda(device_ids[0])
-        print(inputs.shape)
-    '''
