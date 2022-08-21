@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision import models
 
 
+# DSC: Depthwise Separable Convolutions
 def conv_dw(inp, oup, stride):
     return nn.Sequential(
         nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
